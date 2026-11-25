@@ -1,0 +1,439 @@
+---
+title: "Lab1_Files_2026"
+author: "Rubí Martínez Chavarría"
+date: '`r Sys.Date()`'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = TRUE)
+knitr::opts_chunk$set(warning = TRUE)
+
+# lab1_save.RData is written here, where Lab 2 expects to find it
+```
+
+```{r clear-workspace}
+```
+
+```{r install-packages, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(version = "3.22")
+BiocManager::install("snpStats")
+```
+
+```{r load-libraries}
+library(snpStats)
+library(ggplot2)
+
+# Consistent look for all ggplot2 figures: minimal theme, light blue for single-variable plots, red for thresholds
+theme_set(theme_minimal())
+lightBlue <- "lightblue"
+darkBlue <- "#08519C"
+thresholdColour <- "firebrick"
+```
+
+## Understanding the Data
+
+```{r understanding-the-data}
+# The first step in any statistical analysis is to understand the data your working with.
+# No analysis is useful if the data formats and meanings are misunderstood. Genetic data
+# is complex in that it is not just a simple .csv file that can be read into R. Instead,
+# genotype array data are often organized into either (1) .ped and .map files or (2) .bim,
+# .bed and .fam files. Increasingly, sequencing data is organized in .vcf file formats,
+# which is another topic. R can be used to read in either set of file types (utilizing
+# external packages), though the second set of files is substantially smaller and thus
+# generally preferable. In this lab, we describe and explore the elements of the .bim,
+# .bed and .fam files, as well as show how these files can be read into R for analysis.
+
+# Credits: These labs were originally written by Sara Nunez, Nicholas Reich and Andrea
+# Foulkes and further adapted to function with modern R and with updated packages by
+# Cris Van Hout.
+
+# PennCath data
+# In this module series, we utilize the PennCath cohort data, which arises from a
+# Genome-wide association (GWA) study of coronary artery disease (CAD) and cardiovascular
+# risk factors based at the University of Pennsylvania Medical Center. For computational
+# purposes, we will be working with a random subset of the .bim, .bed and fam files,
+# which have been made publicly available at the links provided below.
+
+# The complete data set has a total of n = 3850 individuals that were recruited between
+# July 1998 and March 2003. A nested case-control study of European ancestry severe
+# angiographic CAD cases and angiographic normal controls were selected for genome wide
+# genotyping. Samples were genotyped using the Affymetrix 6.0 GeneChip and genotypes
+# were called using the Birdseed calling algorithm. De-identified data used in the
+# tutorial are comprised of n = 1401 individuals with genotype information across
+# 861,473 single-nucleotide polymorphisms (SNPs); the random subset used here has 500,000 SNPs. Corresponding clinical data are
+# available as well. Notably, PennCath is one of the core GWA studies nested within
+# the Coronary ARtery DIsease Genome-wide Replication and Meta-analysis (CARDIoGRAM)
+# consortium meta-data, and serves as a representative regional population with no
+# known substantial admixture.
+# See the following references for more information on the PennCath study
+# https://www.thelancet.com/journals/lancet/article/PIIS0140-6736(10)61996-4/fulltext?mod=article_inline
+# https://www.thelancet.com/cms/10.1016/S0140-6736(10)61996-4/attachment/2ac2ea83-6fa4-49b4-a122-6733d802eab8/mmc1.pdf
+```
+
+## Reading in the Data
+
+```{r reading-in-the-data}
+# In order to break down the structure of the different data files, we will first read
+# in the .bim, .bed and .fam files together using the command read.plink() found in
+# the snpStats package provided by Bioconductor.
+
+
+# Read in data in two steps. step 1:
+# Download data files and move to relevant folder
+# The data files are available on dropbox. You can download them directly from the web
+# by pasting into a browser. They will be downloaded to the default folder for the browser,
+# and you can move them to a convenient location.
+
+# Note: Occasionally this has been modestly tricky. At the bottom of the Dropbox download link for each of these below you may click the option to download without logging in
+# If you have trouble, let me know or ask a friend.
+#https://www.dropbox.com/scl/fi/swoxvrbgym0csvbc2qg45/GWAS_data.bim?rlkey=4qqvxatn3eu2ytnl7pb0a3qsh&st=6raiw0lg&dl=0
+#https://www.dropbox.com/scl/fi/75xem3sl8ckjomgr1umv2/GWAS_data.bed?rlkey=piu7m292gw8fg0j8uzzp2mg6r&st=th3bsf7g&dl=0
+#https://www.dropbox.com/scl/fi/j7v7vco4w1qmwh7fvmam4/GWAS_data.fam?rlkey=guicoyi6pqjw6a1c6t825f0pd&st=od63d8n2&dl=0
+#https://www.dropbox.com/scl/fi/movt5bogc15y7lwtvxd8d/GWAS_clinical.csv?rlkey=farmw5jqtyt67ke9peyjo3i2p&st=kuneo42c&dl=0
+
+# These are the files on MY computer. You will need to change the file paths
+bedFile<-"GWAS_data.bed"
+bimFile<-"GWAS_data.bim"
+famFile<-"GWAS_data.fam"
+
+# step 2: read in the local files using read.plink() in snpStats
+data <- read.plink(bedFile,bimFile,famFile)
+
+clinicalFile <- "Clinical_Urate.csv"
+clinical <- read.csv(clinicalFile, stringsAsFactors = FALSE)
+clinical$FamID <- as.character(clinical$FamID)
+clinical$sex <- factor(clinical$sex)
+clinical$diuretic_use <- factor(clinical$diuretic_use)
+
+quantitative_cols <- c(
+  "age", "alcohol_drinks_pw", "BMI_cov",
+  "phys_activity_min_pw", "Serum_Urate_mgdL"
+)
+stopifnot(all(vapply(
+  clinical[quantitative_cols], is.numeric, logical(1)
+)))
+```
+
+## Data Dictionary
+
+```{r data-dictionary}
+# FamID, The unique identifier for each individual in the study
+# CAD, Coronary artery disease status (0 = CAD-, 1 = CAD+)
+# sex, self reported biological sex (1 = male, 2 = female)
+# age, self reported age at time of enrollment
+# tg, triglyceride levels (mg/dL)
+# hdl, high density lipoprotein levels (mg/dL)
+# ldl, low density lipoprotein levels (mg/dL)
+
+# what class is "data"
+class(data)
+## [1] "list"
+
+# how many elements are in "data"
+length(data)
+## [1] 3
+```
+
+```{r exploring-the-data-object}
+# You will first notice that when read in this way, the data is of class “list” and
+# has 3 elements in it. Each element corresponds to the three kinds of data that
+# were read into R. We will next explore each component as each serves a different
+# purpose in analysis and will be needed in the upcoming labs.
+
+
+# Exercise
+# Before we look at each piece of data in detail, try looking at the general
+# structure of it using the function str(). You’ll notice that there is information
+# on all three of the objects in the list. What does each element of the list
+# correspond to (e.g. what is it called and what appears to be in it)?
+# Of what "class" is the genotypes object?
+```
+
+## The .bim File
+
+```{r the-bim-file}
+# The .bim file contains information on each SNP and can be seen by calling the map
+# element in the data object (note that .bim and .map file formats are similar).
+attributes(data)
+bim <- data$map
+
+head(bim)
+
+##            chromosome   snp.name cM  position allele.1 allele.2
+## rs4579145           4  rs4579145  0  78303781        T        C
+## rs2768995           6  rs2768995  0   6911315        C        T
+## rs10125738          9 rs10125738  0 101066136        A        G
+## rs888263           18   rs888263  0  12750253        G        A
+## rs7639361           3  rs7639361  0  80138205        A        C
+## rs2430512          17  rs2430512  0  69675940        T        C
+
+# As you can see from the fist six observations displayed above, this file has a
+# row for each SNP and six columns describing the SNPs. The columns correspond
+# to chromosome number, RS number (SNP identifier), genetic distance, the position
+# on the chromosome and the two alleles, respectively. Note that in most contexts,
+# “allele 1” is also referred to as the “minor allele” and “allele 2” refers to the
+# “major allele” at each SNP. It is also important to note that SNP names and
+# locations can change based on the genetic build your data is based on.
+# Here, the RS numbers and positions are from build Hg19 or GRCh37.
+# Which allele is labelled allele 1 depends on how the files were generated (PLINK often sets
+# allele 1 to the minor allele, but not always); the MAF from col.summary() below is the
+# frequency of the less common allele either way. Note that snpStats genotypes count copies
+# of allele 2.
+
+
+# Exercise
+# Start investigating the data at hand. How many SNPs are present?
+# Which chromosomes are represented? table(bim$chromosome)
+# Which chromosome has the most SNPs in this data?
+```
+
+```{r snps-per-chromosome}
+snpsPerChromosome <- data.frame(table(chromosome = factor(bim$chromosome, levels = sort(unique(bim$chromosome)))))
+
+ggplot(snpsPerChromosome, aes(x = chromosome, y = Freq)) +
+  geom_col(fill = lightBlue) +
+  labs(title = "Number of SNPs per chromosome", x = "Chromosome", y = "Number of SNPs")
+```
+
+## The .bed File
+
+```{r the-bed-file}
+# The raw version of the .bed file contains a binary version of the genotype data.
+# This is the largest of the three files because it contains every SNP in the study,
+# as well as the genotype at that snp for each individual. When we read this file into R,
+# however, it’s automatically translated into the genotype information from the binary code.
+# R then store this object as a SnpMatrix object that is critical to SNP analysis.
+# This SnpMatrix corresponds to the genotypes element in the data object.
+
+bed <- data$genotypes
+head(data$genotypes)
+
+## A SnpMatrix with  1401 rows and  500000 columns
+## Row names:  10002 ... 11596
+## Col names:  rs4579145 ... rs946221
+
+
+# Exercise
+# What do the columns in this matrix represent?
+# What do the rows represent?
+# How many SNPs are in this matrix?
+# How many individuals are present?
+# What does the element corresponding to the ith row and jth column represent?
+```
+
+## The .fam File
+
+```{r the-fam-file}
+# Finally, the .fam file contains the participant identification information,
+# including a row for each individual and six columns, corresponding to
+# “Family ID Number”, “Sample ID Number”,“Paternal ID Number”, “Maternal ID Number”,
+# “Sex”, and “Phenotype”. The .fam file can be called by referring to the .fam
+# element of the data object.
+
+fam <- data$fam
+head(fam)
+
+##       FamID IndID PatID MatID sex phenotype
+## 10002    10002      1      0      0   1        1
+## 10004    10004      1      0      0   2        1
+## 10005    10005      1      0      0   1        2
+## 10007    10007      1      0      0   1        1
+## 10008    10008      1      0      0   1        2
+## 10009    10009      1      0      0   1        2
+
+# Note that not all of these columns contain information depending the nature of
+# the data collection process and study design. In this case, we also have a separate
+# clinical file with several outcomes and covariates that will be read into R in
+# the next section.
+
+# Exercise
+# How many observations are there in the fam file?
+# How many males are there (males are coded as 1 as the data dictionary)?
+# How many females?
+# How many levels of the phenotype variable are there?
+# What does the "pedigree" column correspond to?
+# Does it look familiar (where else have you seen it)?
+```
+
+## The Clinical Data
+
+```{r the-clinical-data}
+# Finally, in some instances you may have access to a separate phenotype file
+# that contains information on things like additional covariates for each
+# individual and other “outcome variables” you may be interested in
+# (e.g. something other than affected or variable that codes affected differently).
+# The rows of this file represent each subject and the columns correspond to the
+# available covariates and phenotypes. We read this data in separately as it is
+# a simple .txt file.
+
+
+rownames(clinical) <- clinical$FamID
+print(head(clinical))
+
+##       FamID CAD sex age  tg  hdl  ldl
+## 10002 10002   1   1  60  NA <NA> <NA>
+## 10004 10004   1   2  50  55   23   75
+## 10005 10005   1   1  55 105   37   69
+## 10007 10007   1   1  52 314   54  108
+## 10008 10008   1   1  58 161   40   94
+## 10009 10009   1   1  59 171   46   92
+
+# Exercise
+# Explore the clinical data.
+# How many complete observations are there?
+# What is the age range of study participants?
+# Which column of this data set links it to all the others?
+# How many people are CAD+ (CAD=1)?
+```
+
+```{r clinical-overview}
+# Examine quantitative variables in the serum urate dataset
+
+clinicalLong <- data.frame(
+  variable = factor(
+    rep(
+      c("age", "alcohol_drinks_pw", "BMI_cov",
+        "phys_activity_min_pw", "Serum_Urate_mgdL"),
+      each = nrow(clinical)
+    ),
+    levels = c(
+      "age", "alcohol_drinks_pw", "BMI_cov",
+      "phys_activity_min_pw", "Serum_Urate_mgdL"
+    ),
+    labels = c(
+      "Age (years)",
+      "Alcoholic drinks per week",
+      "BMI (kg/m2)",
+      "Physical activity (min/week)",
+      "Serum urate (mg/dL)"
+    )
+  ),
+  value = c(
+    clinical$age,
+    clinical$alcohol_drinks_pw,
+    clinical$BMI_cov,
+    clinical$phys_activity_min_pw,
+    clinical$Serum_Urate_mgdL
+  )
+)
+
+ggplot(clinicalLong, aes(x = value)) +
+  geom_histogram(
+    fill = lightBlue,
+    colour = "white",
+    bins = 30,
+    na.rm = TRUE
+  ) +
+  facet_wrap(~ variable, scales = "free") +
+  labs(
+    title = "Distribution of clinical variables",
+    x = "Value",
+    y = "Number of individuals"
+  )
+
+# Summarize categorical variables using a bar chart
+
+ggplot(
+  clinical,
+  aes(
+    x = factor(sex),
+    fill = factor(diuretic_use)
+  )
+) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Diuretic use by sex",
+    x = "Sex code",
+    y = "Number of individuals",
+    fill = "Diuretic use code"
+  )
+```
+
+```{r snp-summary-statistics}
+genotype <- data$genotypes
+genoMap <- data$map
+colnames(genoMap)<-c("chr", "SNP", "gen.dist", "position", "A1", "A2")
+
+snpsum.col <- col.summary(genotype)
+head(snpsum.col)
+```
+
+## Filtering SNPs by Call Rate
+
+```{r filtering-snps-by-call-rate}
+# For a given SNP, its call rate is defined as the proportion of inidividuals
+# in our study for which the corresponding SNP information is not missing.
+# For example, a call rate of 95% for a certain SNP means that 95% of the
+# individuals have data for this SNP. Thus to filter by call rate, we look
+# at the column of Call.rate in our dataframe and choose the SNPs that has
+# percentage of missing observations below our chosen threshold. In this
+# module we set a call rate threshold to be 0.95 and then select for SNPs
+# that pass the call rate.
+
+call.thresh <- 0.95
+
+ggplot(snpsum.col, aes(x = Call.rate)) +
+  geom_histogram(fill = lightBlue, colour = "white", bins = 50) +
+  geom_vline(xintercept = call.thresh, colour = thresholdColour, linetype = "dashed") +
+  labs(title = "SNP call rate before filtering", x = "Call rate", y = "Number of SNPs")
+
+keep.call <- with(snpsum.col, (!is.na(Call.rate) & Call.rate >= call.thresh))
+head(keep.call)
+
+keep.call[is.na(keep.call)] <- FALSE
+
+cat(ncol(genotype)-sum(keep.call),"SNPs will be removed due to low call rate.\n")
+
+genotype <- genotype[,keep.call]
+snpsum.col <- snpsum.col[keep.call,]
+
+print(genotype)
+summary(genotype)
+```
+
+## Filtering SNPs by Minor Allele Frequency
+
+```{r filtering-snps-by-minor-allele-frequency}
+# Inadequate power to infer a statiscally significant relationship between
+# the SNP and the trait under study is the result of a large degree of
+# homogeneity at a given SNP across study participants. This occurs when
+# we have a very small minor allele frequency (MAF), which means the majority
+# of the individuals have two copies of the same major alleles. Minor allele
+# frequency is defined as frequency of the less common allele at a variable
+# site. In this module, we remove SNPs whose minor allele fequency is less
+# than 1%. In other cases, particularly when sample size is small, we may
+# apply a cut point of 5%.
+
+minor <- 0.01
+
+ggplot(snpsum.col, aes(x = MAF)) +
+  geom_histogram(fill = lightBlue, colour = "white", bins = 50, na.rm = TRUE) +
+  geom_vline(xintercept = minor, colour = thresholdColour, linetype = "dashed") +
+  labs(title = "Minor allele frequency before filtering", x = "Minor allele frequency", y = "Number of SNPs")
+
+keep.minor <- with(snpsum.col, (!is.na(MAF) & MAF > minor) )
+keep.minor[is.na(keep.minor)] <- FALSE
+
+cat(ncol(genotype)-sum(keep.minor),"SNPs will be removed due to low MAF .\n"  )
+```
+
+```{r subset-by-maf}
+# After knowing the SNPs needed to be removed, we subset the genotype and
+# SNP summary data for the SNPs that pass MAF criteria.
+
+genotype <- genotype[,keep.minor]
+snpsum.col <- snpsum.col[keep.minor,]
+```
+
+## Saving Work for Following Labs
+
+```{r saving-work-for-following-labs}
+# Now that all the data is read into R, we need to save the objects for the
+# rest of the labs running the following command:
+
+save(genotype,genoMap,snpsum.col,genoMap,bedFile,bimFile,famFile, clinical, file= "lab1_save.RData")
+```

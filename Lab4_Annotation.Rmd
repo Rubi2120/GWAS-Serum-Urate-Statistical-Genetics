@@ -1,0 +1,132 @@
+---
+title: "Lab4_Annotation_2026"
+author: "Rubí Martínez Chavarría"
+date: '`r Sys.Date()`'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = TRUE)
+knitr::opts_chunk$set(warning = TRUE)
+
+# Chunks do not share a working directory, so set it for the whole document (adapt to your own compute environment)
+knitr::opts_knit$set(root.dir = "/Users/dubsirubs/universidad/estadistica/gwas/")
+```
+
+## GWAS Variant Annotation
+
+```{r variant-annotation-setup}
+# Genome reference: Affymetrix SNP Array 6.0, GRCh37/hg19
+
+# Install once if needed:
+# BiocManager::install(c("VariantAnnotation",
+#                        "TxDb.Hsapiens.UCSC.hg19.knownGene",
+#                        "org.Hs.eg.db"))
+
+rm(list = ls())
+
+# Libraries
+library(dplyr)
+library(VariantAnnotation)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(org.Hs.eg.db)
+library(gt)
+
+setwd("/Users/dubsirubs/universidad/estadistica/gwas/")
+
+# Load saved objects
+load("lab3_save.RData")
+
+source("https://raw.githubusercontent.com/CrisVanHout-LIIGH/Class/refs/heads/main/LabFunctions.R")
+
+# Load and annotate GWAS results
+# Note: if merge runs out of memory see https://stackoverflow.com/questions/51295402/r-on-macos-error-vector-memory-exhausted-limit-reached
+GWASout <- read.table("GWAA.txt", header = TRUE,
+                      colClasses = c("character", rep("numeric", 4)))
+colnames(GWASout) <- c("SNP", "effect", "stdErr", "tValue", "pValue")
+GWASout$Neg_logP  <- -log10(GWASout$pValue)
+GWASout <- merge(GWASout, genoMap[, c("SNP", "chr", "position", "A1", "A2")], by = "SNP")
+GWASout$MAF <- snpsum.col[GWASout$SNP, "MAF"]
+GWASout <- arrange(GWASout, -Neg_logP)
+```
+
+## Top-Hit Annotation
+
+```{r top-hit-annotation}
+N       <- 10
+topHits <- GWASout[order(GWASout$pValue), ][1:N, ]
+
+# Build GRanges for top hits
+targets <- with(topHits,
+                GRanges(seqnames = Rle(paste0("chr", chr)),
+                        ranges   = IRanges(position, end = position, names = SNP),
+                        strand   = Rle("*")))
+
+# Locate variants relative to UCSC known genes
+loc       <- locateVariants(targets, TxDb.Hsapiens.UCSC.hg19.knownGene, AllVariants())
+out       <- as.data.frame(loc, row.names = NULL)
+out$names <- names(targets)[out$QUERYID]
+out       <- unique(out[, c("names", "seqnames", "start", "end", "LOCATION", "GENEID")])
+
+# Convert Entrez IDs to gene symbols via AnnotationDbi
+# Note: keep gene symbols out of Excel (auto-converts e.g. MARCH1 to dates)
+entrezIDs    <- unique(na.omit(as.character(out$GENEID)))
+symbolMap    <- AnnotationDbi::select(org.Hs.eg.db,
+                                      keys    = entrezIDs,
+                                      columns = "SYMBOL",
+                                      keytype = "ENTREZID")
+out$GENESYMBOL <- symbolMap$SYMBOL[match(as.character(out$GENEID), symbolMap$ENTREZID)]
+
+# Merge annotation back to top hits
+# all.x = TRUE preserves SNPs with no gene overlap; duplicates arise for multi-gene loci
+annotatedHits <- merge(topHits, out, by.x = "SNP", by.y = "names", all.x = TRUE)
+annotatedHits <- dplyr::select(annotatedHits, -any_of(c("start", "tValue", "Neg_logP",
+                                                 "seqnames", "GENEID", "end")))
+annotatedHits <- annotatedHits[, c("SNP", "chr", "position", "A1", "A2", "MAF",
+                                   "effect", "stdErr", "pValue",
+                                   "LOCATION", "GENESYMBOL")]
+annotatedHits <- arrange(annotatedHits, pValue)
+
+# Display formatted table
+# Effect sizes are per copy of allele 2 (A2), the allele counted by the GWAS; MAF is the frequency of the less common allele
+# Reference: Table 1 style from https://www.nature.com/articles/ng.2797
+annotatedHits %>%
+  gt() %>%
+  tab_header(
+    title    = "Top GWAS Hits",
+    subtitle = "Annotated with gene symbols and genomic position"
+  ) %>%
+  fmt_number(columns = c(effect, stdErr, MAF), decimals = 3) %>%
+  fmt_scientific(columns = pValue, decimals = 2) %>%
+  cols_label(
+    SNP        = "rsID",
+    chr        = "Chromosome",
+    position   = "Position",
+    A1         = "Allele 1",
+    A2         = "Allele 2",
+    MAF        = "MAF",
+    effect     = "Effect per A2 Copy",
+    stdErr     = "Std. Error",
+    pValue     = "P-value",
+    LOCATION   = "Location",
+    GENESYMBOL = "Gene Symbol"
+  ) %>%
+  tab_options(table.font.size = 12, heading.align = "center")
+```
+
+## External Annotation Resources
+
+```{r external-annotation-resources}
+# VEP (Ensembl, hg19):  http://grch37.ensembl.org/Homo_sapiens/Tools/VEP
+# GWAS Catalog:         https://www.ebi.ac.uk/gwas/search?query=cetp
+# OMIM (CETP):          https://www.omim.org/entry/118470
+# dbSNP (rs1532625):    https://www.ncbi.nlm.nih.gov/snp/rs1532625
+# UCSC Browser:         https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=chr16:56971289-56971489
+# Ensembl Variant:      https://grch37.ensembl.org/Homo_sapiens/Variation/Explore?v=rs1532625
+```
+
+
+### Use of AI-Assisted Tools
+
+AI-assisted tools were used to support the documentation of the laboratory, improve the clarity of written explanations, and address questions related to statistical concepts and R code. The tools served as supplementary assistance during the development and review of the work.

@@ -1,0 +1,278 @@
+---
+title: "Lab3_GWAS_2026"
+author: "Rubí Martínez Chavarría"
+date: '`r Sys.Date()`'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = TRUE)
+knitr::opts_chunk$set(warning = TRUE)
+
+# Chunks do not share a working directory, so set it for the whole document (adapt to your own compute environment)
+knitr::opts_knit$set(root.dir = "/Users/dubsirubs/universidad/estadistica/gwas/")
+```
+
+## Genome-Wide Association Analysis
+
+```{r gwas-setup}
+# Here, we use a function we’ve written GWAA() to conduct the analysis.
+# The GWAA function requires two arguments. The genotype argument should specify
+# the entire genotype data object in SnpMatrix format. The phenodata argument should
+# be a data frame with a column of sample IDs, corresponding to the row names of
+# genotype, followed by columns for the outcome variable and covariates to be included
+# in the model. In the following code, we assign the genotype variable and write out
+# a table called GWAA.txt for the results to later be written to.
+
+rm(list=ls()) #remove any data objects or functions to avoid collisions or misspecification
+
+#BiocManager::install("doParallel",force=TRUE) #run only once to install
+
+library(dplyr)
+library(doParallel)
+
+# below are some of the plotting tools that we used before using 'source'
+source("https://raw.githubusercontent.com/CrisVanHout-LIIGH/Class/refs/heads/main/LabFunctions.R")
+
+setwd("/Users/dubsirubs/universidad/estadistica/gwas/")
+load("lab2_save.RData")
+
+#Print the number of SNPs to be checked
+cat(paste(ncol(genotype), "Thus far, SNPs are included in analysis.\n"))
+cat(paste(nrow(genotype), "Thus far, participants are included in analysis.\n"))
+```
+
+## Manipulating Phenotype Data
+
+```{r manipulating-phenotype-data}
+#Next we focus on the phenodata argument. First we assign phenoSub to be 'phenodata',
+# which is created from merging the clinical and pcs data. We then create the phenotype
+# value (dependent or outcome variable) by choosing (or not) a transformation of the phenotype
+# variable. Next we remove anyone that doesn’t have data available, and subset the genotype
+# data for the remaining individuals. Lastly, we want to remove variables that won’t be used
+# in analysis, e.g. the remaining outcome variables and the untransformed version of the phenotype.
+
+traitName <- "tg"
+hist(clinical$tg)
+
+clinicalSub <- clinical[, c("FamID", "sex", "age", traitName)]
+names(clinicalSub)[names(clinicalSub) == traitName] <- "raw_trait"
+clinicalSub$phenotype <- rntransform(as.numeric(as.character(clinicalSub$raw_trait)))  # or log(), rntransform(), apply a transformation here
+clinicalSub$raw_trait <- NULL
+
+
+# Subset pcs to keep FamID and any PCs that you choose to include
+pcsSub <- pcs[, c("FamID", "pc5")]
+
+# Merge clinicalSub and pcsSub by FamID
+phenodata <- merge(clinicalSub, pcsSub, by = "FamID")
+
+# Remove rows with missing phenotype values
+phenodata <- phenodata[!is.na(phenodata$phenotype), ]
+
+# Align genotype rows to phenodata
+phenodata <- phenodata[phenodata$FamID %in% rownames(genotype), ]
+genotype  <- genotype[phenodata$FamID, ]
+
+epidemological_model<-glm(phenotype~.-FamID,data=phenodata,family=gaussian) #not testing any snps, but all covariates included in phenodata (except FamID)
+summary(epidemological_model)
+```
+
+```{r covariate-notes}
+# Note that the GWAS model in the GWAA function takes all variables in the 'phenodata' data.frame as
+# covariates, i.e. age sex and any pcs. One may control which covariates are included in
+# the phenodata data.frame, or by changing the glm in the GWAA function to explicitly account
+# for covariates
+# For example, the variable 'phenotype' is the dependent variable, and all other variables in the
+# 'phenodata' dataframe except FamID are included as independent variables, i.e., covariates
+# summary(glm(phenotype ~ . - FamID, family = gaussian, data = cbind(phenodata)))
+
+#print(head(phenodata))
+
+par(mfrow=c(1,2))
+hist(as.numeric(as.character(clinical[[traitName]])), main="Untransformed", xlab=paste(traitName))
+hist(phenodata$phenotype, main="Transformed", xlab=paste(traitName))
+```
+
+## The GWAA Function
+
+```{r the-gwaa-function}
+#The function itself has four major elements. Given the data described above, it
+# (1) determines how many cores to use/which method to employ for parallel processing
+# (2) converts the genotype data into the necessary format for an additive model,
+# (3) fits a linear model for each SNP and covariates (one group at a time) and then
+# (4) writes the SNP coefficient details (the estimate, standard error, test statistic
+# and p value) from each model out to the GWAA.txt file.
+
+# Note that each core uses about 250Mb memory to analyze all autosomes ~350k variants, or 2Gb total.
+# Low memory computers may want to reduce the number of hosts to 2 or even 1 to limit use of RAM.
+# (and/or close your memory hungry web browser while you run this analysis!)
+
+GWAA <- function(genotype, phenodata, filename = NULL, workers = getOption("mc.cores", 2L), flip = FALSE, hosts = (detectCores()/2)) {
+    if (is.null(hosts)) {
+        cl <- makeCluster(workers)
+    } else {
+        cl <- makeCluster(hosts, "PSOCK")
+    }
+    show(cl)
+    registerDoParallel(cl)
+    # Function that will change which allele is counted (major or minor)
+    flip.matrix <- function(x) {
+        zero2 <- which(x == 0)
+        two0 <- which(x == 2)
+        x[zero2] <- 2
+        x[two0] <- 0
+        return(x)
+    }
+    foreach(part = 1:nSplits) %do% {
+        # genotypes are coded as the number of copies of allele 2 (A2), so the Estimate is the change in
+        # the phenotype per copy of A2 (per copy of A1 if flip = TRUE)
+        genoNum <- as(genotype[, snp.start[part]:snp.stop[part]], "numeric")
+        # flip.matrix function employed
+        if (isTRUE(flip))
+            genoNum <- flip.matrix(genoNum)
+        rsVec <- colnames(genoNum)
+        res <- foreach(snp.name = rsVec, .combine = "rbind") %dopar% {
+          pheno_tmp <- phenodata
+          pheno_tmp$snp <- genoNum[, snp.name]
+          fit <- glm(phenotype ~ . - FamID, family = gaussian, data = pheno_tmp)
+          summary(fit)$coefficients["snp", ]
+        }
+
+
+write.table(cbind(rsVec, res), filename, append = TRUE, quote = FALSE, col.names = FALSE, row.names = FALSE)
+    cat(sprintf("GWAS SNPs %s-%s (%s%% finished)\n", snp.start[part], snp.stop[part], 100 * part/nSplits))
+    }
+  stopCluster(cl)
+  return(print("Done."))
+} #end GWAA
+```
+
+## Running the GWAS
+
+```{r running-the-gwas}
+# Perhaps test the function on a subset of the data. Change the commented out lines below to control full GWAS vs. single chromosome
+
+#this takes about 30seconds on 8 cores, chr10 is close to the genomewide average
+SNPsToTest <- genoMap$SNP[genoMap$chr==10]
+#so, this should take about 22 times as long as chr10
+#SNPsToTest <- genoMap$SNP[genoMap$chr<=22]
+
+genotype_subset <- genotype[,colnames(genotype)%in%SNPsToTest]
+
+nSNPs <- ncol(genotype_subset)
+nSplits <- 20
+genosplit <- ceiling(nSNPs/nSplits) # number of SNPs in each subset
+snp.start <- seq(1, nSNPs, genosplit) # index of first SNP in group
+snp.stop <- pmin(snp.start+genosplit-1, nSNPs) # index of last SNP in group
+
+#create text file for GWAA output to be written to (re-created on every run so that results are not appended to an old file)
+columns<-c("SNP", "Estimate", "Std.Error", "t-value", "p-value")
+write.table(t(columns), "GWAA.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+
+#Run the GWAS
+start <- Sys.time()
+GWAA(genotype_subset, phenodata, filename="GWAA.txt") #note this file has 5 columns; SNP,Estimate,Std.Error,t-value,Pr(>|t|)
+cat(paste(ncol(genotype_subset), "running GWAS for this many SNPs.\n"))
+end <- Sys.time()
+print(end-start) #output approximately how long the analysis took to compute
+
+gwas <- read.table("GWAA.txt", header = TRUE)
+
+gwasAnnotation<- gwas %>% left_join(genoMap, by = "SNP") #Annotate variant information for any SNP that exists in the gwas output. left_join annotates any SNP in the gwas data.frame with information from genoMap. right_join annotates any SNP in the genoMap data.frame with information from gwas. #note that base R 'merge' threw an error that the vectors in the merge were too long, which they shouldn't be, but this works as expected
+colnames(gwasAnnotation)[colnames(gwasAnnotation) == "chr"] <- "CHR"
+colnames(gwasAnnotation)[colnames(gwasAnnotation) == "position"] <- "BP"
+colnames(gwasAnnotation)[colnames(gwasAnnotation) == "p.value"] <- "P"
+```
+
+## Manhattan and QQ Plots
+
+```{r manhattan-and-qq-plots}
+# now, some essential visualizations
+par(mfrow = c(1, 1))
+manhattan(gwasAnnotation,suggestiveline = F, genomewideline = F)
+QQ_plot(gwasAnnotation$P)
+
+# check out the most significant associations
+gwasAnnotation[order(gwasAnnotation$P), ][1:5, ]
+
+# Extract a significantly associated variant from genotype matrix
+variant <- gwasAnnotation[order(gwasAnnotation$P), ][1,1 ] #select top association
+#variant <- "rs1532625" #or select a specific variant by rsID
+snp_subset <- genotype[, c(variant), drop = FALSE]  # Keep as dataframe
+
+#evaluate relevant annotation for the variant and recode to the original allelic coding
+variantAnnotation<-gwasAnnotation[gwasAnnotation$SNP == variant, , drop = FALSE]
+variantAnnotation
+snpsum.col[variant, , drop = FALSE]
+```
+
+## Visualizing the Top Association
+
+```{r visualizing-the-top-association}
+# Finally, we build a small dataframe of clinical and variant data for plotting
+# We may select the untransformed variable for plotting
+#clinical_subset <- clinical[, c(traitName), drop = FALSE]  # Ensure it remains a dataframe
+# or
+# Select the transformed variable that was used in the GWAS
+# (the GWAA function fits a gaussian model, so this lab is written for continuous traits)
+
+clinical_subset <- clinicalSub[, "phenotype", drop = FALSE];traitName<-"phenotype"
+rownames(clinical_subset) <- clinicalSub$FamID
+
+# Merge both pheno and geno datasets by rownames (assuming sample IDs are rownames)
+# Clean up the format
+genopheno.df <- merge(clinical_subset, snp_subset, by = "row.names")
+genopheno.df$Row.names <- NULL
+genopheno.df[[traitName]] <- as.numeric(genopheno.df[[traitName]])
+genopheno.df[[variant]] <- as.factor(as.numeric(genopheno.df[[variant]]))
+
+# Note that this recoding is only valid if the GWAA flip=FALSE,
+# if flip=TRUE, the genotype coded by 3 is always the minor allele homozygote
+genopheno.df$variant_recoded <- ifelse(genopheno.df[[variant]] == 0, NA,
+                       ifelse(genopheno.df[[variant]] == 1,
+                        paste(variantAnnotation$A1, variantAnnotation$A1, sep = ""),
+                         ifelse(genopheno.df[[variant]] == 2,
+                          paste(variantAnnotation$A1, variantAnnotation$A2, sep = ""),
+                           paste(variantAnnotation$A2, variantAnnotation$A2, sep = ""))))
+genopheno.df$variant_recoded<-factor(genopheno.df$variant_recoded,
+                                     levels = c(paste(variantAnnotation$A1, variantAnnotation$A1, sep = ""),
+                                                paste(variantAnnotation$A1, variantAnnotation$A2, sep = ""),
+                                                paste(variantAnnotation$A2, variantAnnotation$A2, sep = "")))
+
+# Orient the model in the context of the genotype
+head(genopheno.df)
+table(genopheno.df[[variant]])
+table(genopheno.df$variant_recoded)
+
+# Filter out rows where variant is missing
+genopheno.df.nomiss <- genopheno.df[genopheno.df[[variant]] != 0, ]
+
+library(rlang) #this package allows us to interpret the variables 'variant' and 'traitName' as below
+
+# Recall, this plot uses the phenotype values as used in the GWAS.
+mixedPlot <- ggplot(genopheno.df.nomiss, aes(x = variant_recoded, y = !!sym(traitName), fill = variant_recoded)) +
+    geom_flat_violin(alpha = 0.5, position = position_nudge(x = .2, y = 0)) +
+    geom_jitter(alpha = 0.5, width = 0.15) +
+    geom_boxplot(alpha = 0.5, width = .25, outlier.shape = NA) +
+    scale_fill_manual(values = c("lightblue", "steelblue", "#08519C")) +
+    theme_minimal() +
+    theme(legend.position = "none")
+
+mixedPlot
+```
+
+## Interpreting the Results
+
+```{r interpreting-the-results}
+# You have just run a Genome Wide Association Study!
+# What are the units and direction of effect for the association?
+# What gene is this variant in or near?
+# Where is that gene expressed?
+# What is known about the function of that gene in pathways related to the trait?
+# Might there be diagnostic, biomarker, pharmaceutical value to this observation?
+
+#save the processing in this step for the next lab
+save(gwas,gwasAnnotation,genopheno.df,genopheno.df.nomiss,genotype,genoMap,snpsum.col, snpsum.row, clinical, pcs, file= "lab3_save.RData")
+```

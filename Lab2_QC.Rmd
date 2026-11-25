@@ -1,0 +1,433 @@
+---
+title: "Lab2_QC_2026"
+author: "Rubí Martínez Chavarría"
+date: '`r Sys.Date()`'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = TRUE)
+knitr::opts_chunk$set(warning = TRUE)
+
+# Chunks do not share a working directory, so set it for the whole document (adapt to your own compute environment)
+# Working directory is configured when rendering the document.
+```
+
+## Setup and Summary Statistics
+
+```{r setup-and-summary-statistics}
+rm(list=ls()) #remove any data objects or functions to avoid collisions or misspecification
+
+#BiocManager::install("snpStats",force=TRUE) #run only once to install
+#BiocManager::install("SNPRelate",force=TRUE) #run only once to install
+
+library(snpStats)
+library(SNPRelate)
+library(gdsfmt)
+library(dplyr)
+library(ggplot2)
+
+# Consistent look for all ggplot2 figures: minimal theme, light blue for single-variable plots, red for thresholds
+theme_set(theme_minimal())
+lightBlue <- "lightblue"
+darkBlue <- "#08519C"
+thresholdColour <- "firebrick"
+
+# Naturally, adapt this to your own compute environment
+getwd()
+# Load Lab 1 results from the current project directory.
+load("lab1_save.RData")
+
+# Keep track of how many individuals and SNPs remain after each QC step
+qcSteps <- data.frame(step = "Start", individuals = nrow(genotype), SNPs = ncol(genotype))
+
+#specificy the number of threads for IBD and PCA functions
+numCores=4
+
+# calculate summary statistics for the genotype matrix per variant (column)
+# and per individual (row)
+snpsum.row <- row.summary(genotype) #from snpStats
+snpsum.col<-col.summary(genotype)
+```
+
+## Call Rate
+
+```{r call-rate}
+# To filter by call rate, we remove individuals that are missing genotype data across
+# more than a pre-defined percentage of the typed SNPs. This proportion of missingness
+# across SNPs is the sample call rate and we apply a threshold of 95%, meaning that we
+# drop those individuals missing genotype data for more than 5% of the typed SNPs. A
+# new reduced dimesion SnpMatrix gentotype is created from this filter.
+
+samplecall.thresh <- 0.95
+
+# Subset the genotype and clinical data to remove the individuals that do not pass the criteria
+keep.samplecall <- with(snpsum.row, !is.na(Call.rate) & Call.rate > samplecall.thresh)
+keep.samplecall[is.na(keep.samplecall)] <- FALSE
+
+ggplot(snpsum.row, aes(x = Call.rate)) +
+  geom_histogram(fill = lightBlue, colour = "white", bins = 50, na.rm = TRUE) +
+  geom_vline(xintercept = samplecall.thresh, colour = thresholdColour, linetype = "dashed") +
+  labs(title = "Sample call rate before filtering",
+       subtitle = paste(nrow(genotype) - sum(keep.samplecall), "individuals below the threshold"),
+       x = "Sample call rate", y = "Number of individuals")
+
+cat(nrow(genotype)-sum(keep.samplecall), "individuals will be removed due to low sample call rate.\n")
+
+genotype <- genotype[keep.samplecall,]
+clinical<- clinical[ rownames(genotype), ]
+snpsum.row<-row.summary(genotype)
+qcSteps <- rbind(qcSteps, data.frame(step = "Sample call rate", individuals = nrow(genotype), SNPs = ncol(genotype)))
+```
+
+## Heterozygosity
+
+```{r heterozygosity}
+# Heterozygosity refers to the presence of each of two alleles at a given SNP
+# within an individual. This is expected under Hardy-Weinberg Equilibrium (HWE)
+# to occur with probability of 2p(1-p) where p is the dominant allele frequency
+# at that SNP (assuming a bi-allelic SNP). Excess or deficient heterozygosity
+# across typed SNPs within an individual is commonly considered as an indication
+# of inbreeding but also serves as a screen for poor sample quality.
+
+
+# In this lab, heterozygosity F statistic calculation is carried out with the form,
+# |F|=(1-O/E), where O is observed proportion of heterozygous genotypes for a given
+# sample and E is the expected proportion of heterozygous genotypes for a given
+# sample based on the minor allele frequency across all non-missing SNPs for a given
+# sample. We will remove any sample with inbreeding coefficient |F| > 0.05, which
+# might indicate autozygosity (which is not inherently a problem, but perhaps
+# unusual) or poor quality sample.
+
+# What type of poor quality sample is heterozygosity based quality control
+# likely to identify?
+
+# Recalculate the allele frequencies and the call matrix for the individuals that remain
+snpsum.col<-col.summary(genotype)
+MAF <- snpsum.col$MAF
+callmatrix <- !is.na(genotype)
+
+hetExp <- callmatrix %*% (2*MAF*(1-MAF)) #Note that %*% is base R matrix multiplication
+hetObs <- with(snpsum.row, Heterozygosity*(ncol(genotype))*Call.rate)
+snpsum.row$hetF <- 1-(hetObs/hetExp)
+
+head(snpsum.row)
+
+het.thresh <- 0.05
+
+keep.het <- with(snpsum.row, abs(hetF) <= het.thresh)
+keep.het[is.na(keep.het)] <- FALSE
+
+ggplot(data.frame(hetF = as.numeric(snpsum.row$hetF)), aes(x = hetF)) +
+  geom_histogram(fill = lightBlue, colour = "white", bins = 50, na.rm = TRUE) +
+  geom_vline(xintercept = c(-het.thresh, het.thresh), colour = thresholdColour, linetype = "dashed") +
+  labs(title = "Heterozygosity F statistic across individuals",
+       subtitle = paste(nrow(genotype) - sum(keep.het), "individuals outside the threshold"),
+       x = "Heterozygosity F statistic", y = "Number of individuals")
+
+ggplot(data.frame(hetObs = as.numeric(hetObs), hetExp = as.numeric(hetExp), keep = keep.het),
+       aes(x = hetExp, y = hetObs, colour = keep)) +
+  geom_point(alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  scale_colour_manual(values = c("TRUE" = lightBlue, "FALSE" = thresholdColour),
+                      labels = c("TRUE" = "Retained", "FALSE" = "Removed")) +
+  labs(title = "Observed vs. expected heterozygous genotypes per individual",
+       x = "Expected number of heterozygous genotypes", y = "Observed number of heterozygous genotypes", colour = "")
+cat(nrow(genotype)-sum(keep.het), "individuals will be removed due to unusual F coefficient.\n")
+```
+
+```{r subset-after-heterozygosity}
+# As before, after identifying the individuals to be removed, we subset the genotype
+# and clinical data set using information obtained above to remove the individuals
+# that do not pass the criteria from our sample.
+
+genotype <- genotype[keep.het,]
+clinical<- clinical[rownames(genotype), ]
+# After removing individuals, summary statistics of the genetic data change.
+# Recalculate sumstats
+snpsum.row<-row.summary(genotype)
+qcSteps <- rbind(qcSteps, data.frame(step = "Heterozygosity", individuals = nrow(genotype), SNPs = ncol(genotype)))
+```
+
+## Hardy-Weinberg Equilibrium
+
+```{r hardy-weinberg-equilibrium}
+# Why calculate HWE based only on the CAD controls?
+# How many variants are omitted comparing controls only vs. the whole sample?
+
+hardy.thresh <- 10^-6     #the threshold is parameterized as a p-value, not a z score as in col.summary
+# Serum urate is a quantitative trait.
+# No validated CAD control group is available.
+# Calculate HWE using all individuals retained after sample QC.
+controls <- rownames(genotype)
+stopifnot(length(controls) == nrow(genotype))
+# use col.summary on genetic data from controls only
+snpsum.colControls <- col.summary(genotype[controls,])
+#use qnorm to convert the p value threshold 'hardy' to a z score
+keep.hwe <- with(snpsum.colControls, !is.na(z.HWE) & ( abs(z.HWE) < abs( qnorm(hardy.thresh/2) ) ) )
+
+ggplot(data.frame(absZ = abs(snpsum.colControls$z.HWE)), aes(x = absZ)) +
+  geom_histogram(fill = lightBlue, colour = "white", bins = 50, na.rm = TRUE) +
+  geom_vline(xintercept = abs(qnorm(hardy.thresh/2)), colour = thresholdColour, linetype = "dashed") +
+  scale_y_sqrt() +
+  labs(title = "Hardy-Weinberg deviation in retained samples",
+       subtitle = paste(sum(is.na(keep.hwe) | !keep.hwe), "SNPs beyond the threshold"),
+       x = "Absolute HWE z score", y = "Number of SNPs (square root scale)")
+
+# We can delete this object now
+rm(snpsum.colControls)
+
+keep.hwe[is.na(keep.hwe)] <- FALSE
+
+cat(ncol(genotype)-sum(keep.hwe),"SNPs will be removed due to deviation from HWE.\n")
+
+# Subset the genotype data yet again
+genotype <- genotype[,keep.hwe]
+genoMap <- genoMap[colnames(genotype), , drop = FALSE]
+stopifnot(identical(colnames(genotype), rownames(genoMap)))
+qcSteps <- rbind(qcSteps, data.frame(step = "HWE", individuals = nrow(genotype), SNPs = ncol(genotype)))
+
+# Check the dimensionality of the working genotype matrix
+print(genotype)
+```
+
+## Cryptic Relatedness, Duplicates and Gender Identity
+
+```{r cryptic-relatedness}
+# Population-based cohort studies often only concerns unrelated individuals and
+# the generalized linear modeling approach assumes independence across individuals.
+# In regional cohort studies (e.g. hospital-based cohort studies) of complex
+# diseases, however, individuals from the same family could be unintentionally
+# recruited. To mitigate this problem, we thus employ Identity-by-descent (IBD)
+# analysis which is a common measurement of relateness and duplication. Note that
+# gender identity can also be checked at this stage to confirm self-reported gender
+# consistency on X and Y chromosomes. With this data, we do not check gender
+# identity due to unavailibility of sex chromosomes information.
+
+# To filter on relateness criteria, we use the SNPRelate package to perform
+# identity-by-descent (IBD) analysis. This package requires that the data be
+# transformed into a GDS format file. IBD analysis is performed on only a subset
+# of SNPs that are in linkage equilibrium by iteratively removing adjacent SNPs
+# that exceed an linkage disequilibrium (LD) threshold in a sliding window using
+# the snpgdsLDpruning() function. In this lab, we set LD threshold to be .2
+# (max R2 between two SNPs is 0.2) and
+# kinship threshold to be 6.25%, which means that we would remove SNPs in LD above
+# the LD threshold from the IBD analysis, and remove one member of any pair of
+# individuals whose kinship is at or above the kinship threshold. Then we used
+# snpgdsBED2GDS to create a GDS file of the data set from .bim, .bed and .fam files.
+
+ld.thresh <- 0.2   #maximum r2 between variants in 0.2
+kin.thresh <- 0.0625 #for context, the kinship coefficient for 1st cousins is 0.0625
+# twins is 1, unrelated near 0
+
+# Create a specialized 'genetic data set' or .gds object using a function from
+# SNPRelate package. It reads from the original files, and subsets to the individuals and
+# and variants in the current 'genotype' object
+snpgdsBED2GDS(bedFile, famFile, bimFile,"GWAS_data.gds")
+genofile <- snpgdsOpen("GWAS_data.gds", readonly = FALSE)
+gds.ids <- read.gdsn(index.gdsn(genofile, "sample.id"))
+gds.ids <- sub("-1", "", gds.ids)
+add.gdsn(genofile, "sample.id", gds.ids, replace = TRUE)
+
+
+# Generate a subset of variants in low linkage disequilibrium for IBD and PCA,
+# as these methods assume independence of variants
+set.seed(1000)
+snpSUB <- snpgdsLDpruning(genofile,
+                          verbose=TRUE,
+                          ld.threshold = ld.thresh,
+                          maf=0.05,
+                          missing.rate=0.05,
+                          sample.id = rownames(genotype),
+                          snp.id = colnames(genotype))
+
+snpset.LoLD <- unlist(snpSUB, use.names=FALSE)
+
+
+cat(length(snpset.LoLD),"will be used in IBD analysis\n")
+
+# Use another function in SNPRelate to estimate Identity by Descent between
+# all participants using a Method of Moments estimator
+geno.sample.ids <- rownames(genotype)
+ibd <- snpgdsIBDMoM(genofile, kinship=TRUE, sample.id = geno.sample.ids, snp.id = snpset.LoLD,  num.thread = numCores)
+ibdcoeff_all <- snpgdsIBDSelection(ibd)
+
+head(ibdcoeff_all)
+
+#select those pairs that have kinship greater than the threshold value for
+# further evaluation
+kins<-subset(ibdcoeff_all,ibdcoeff_all$kinship>=kin.thresh)
+
+```
+
+```{r remove-related-samples}
+# Greedy removal: repeatedly remove the sample involved in the most remaining related pairs
+# (ties go to the sample with the lower call rate), then drop every pair that sample was in.
+# This removes the fewest samples, never lists a sample twice, and is deterministic.
+related.samples <- c()
+pairs <- kins[, c("ID1", "ID2")]
+while (nrow(pairs) > 0) {
+    counts <- table(c(pairs$ID1, pairs$ID2))
+    worst  <- names(counts)[counts == max(counts)]
+    drop.id <- worst[which.min(snpsum.row[worst, "Call.rate"])]
+    related.samples <- c(related.samples, drop.id)
+    pairs <- pairs[pairs$ID1 != drop.id & pairs$ID2 != drop.id, ]
+}
+
+#Subset the genotype and clinical data yet again
+genotype <- genotype[ !(rownames(genotype) %in% related.samples), ]
+clinical <- clinical[ !(clinical$FamID %in% related.samples), ]
+
+# Recompute the sample IDs so that the removed relatives are excluded from the PCA below
+geno.sample.ids <- rownames(genotype)
+qcSteps <- rbind(qcSteps, data.frame(step = "Relatedness", individuals = nrow(genotype), SNPs = ncol(genotype)))
+
+cat(length(related.samples), " samples removed due to kinship >=", kin.thresh,"\n")
+
+```
+
+```{r ibd-plots, dev = "png"}
+#evaluate the distribution of pairwise kinships
+#this is ALL PAIRS of individuals, mostly minimally related (unrelated)
+
+# Expected IBD0 and IBD1 for well-known relationships
+ibdReference <- data.frame(k0 = c(1, 0.25, 0, 0), k1 = c(0, 0.5, 1, 0),
+                           label = c("Unrelated", "Full siblings", "Parent-child", "Duplicate / twins"))
+
+ggplot(ibdcoeff_all, aes(x = k0, y = k1)) +
+  geom_point(colour = lightBlue, size = 0.5) +
+  geom_point(data = kins, colour = thresholdColour, size = 1.5) +
+  geom_point(data = ibdReference, shape = 4, size = 3) +
+  geom_text(data = ibdReference, aes(label = label), vjust = -1, size = 3) +
+  coord_cartesian(xlim = c(-0.05, 1.05), ylim = c(-0.05, 1.1)) +
+  labs(title = "IBD of all pairs of individuals",
+       subtitle = paste(nrow(kins), "pairs at or above the kinship threshold shown in red"),
+       x = "IBD0", y = "IBD1")
+
+ggplot(ibdcoeff_all, aes(x = kinship)) +
+  geom_histogram(fill = lightBlue, colour = "white", bins = 60) +
+  geom_vline(xintercept = kin.thresh, colour = thresholdColour, linetype = "dashed") +
+  scale_y_sqrt() +
+  labs(title = "Pairwise kinship coefficients", x = "Kinship coefficient", y = "Number of pairs (square root scale)")
+```
+
+## PCA
+
+```{r pca}
+# Principle components of Ancestry is one approach to visualizing and classifying
+# individuals into ancestry groups based on their observed genetic similarity.
+# There are two reasons for doing this. First, self-reported ancestry can
+# differ from clusters of individuals that are based on genetics infomation.
+# Second, the presence of an individual not appearing to fall within a genetic
+# similarity cluster may be suggestive of a sample error.
+
+# Use another function from SNPRelate to generate PCs, by default, this function estimates
+# the first 32 PCs
+pca <- snpgdsPCA(genofile, sample.id = geno.sample.ids,  snp.id = snpset.LoLD, num.thread=numCores)
+
+pcs <- data.frame(FamID = pca$sample.id, pca$eigenvect[,1 : 10], stringsAsFactors = FALSE)
+
+colnames(pcs)[2:11]<-paste("pc", 1:10, sep = "")
+
+print(head(pcs))
+
+pctab <- data.frame(sample.id = pca$sample.id,
+                    PC1 = pca$eigenvect[,1],
+                    PC2 = pca$eigenvect[,2],
+                    PC3 = pca$eigenvect[,3],
+                    PC4 = pca$eigenvect[,4],
+                    PC5 = pca$eigenvect[,5],
+                    PC6 = pca$eigenvect[,6],
+                    stringsAsFactors = FALSE)
+
+# Add case-control status and sex so that the ancestry plots can be coloured by them
+sample.match <- match(pctab$sample.id, clinical$FamID)
+stopifnot(!anyNA(sample.match))
+
+pctab$Serum_Urate_mgdL <- as.numeric(
+  as.character(clinical$Serum_Urate_mgdL[sample.match])
+)
+pctab$sex <- clinical$sex[match(pctab$sample.id, clinical$FamID)]
+
+pcLabel <- function(i) paste0("Principal component ", i, " (", round(100*pca$varprop[i], 1), "% of variance)")
+
+ggplot(
+  pctab,
+  aes(x = PC1, y = PC2, colour = Serum_Urate_mgdL)
+) +
+  geom_point(alpha = 0.7) +
+  scale_colour_gradient(
+    low = lightBlue,
+    high = darkBlue,
+    na.value = "grey70"
+  ) +
+  labs(
+    title = "Genetic population structure by serum urate",
+    x = pcLabel(1),
+    y = pcLabel(2),
+    colour = "Serum urate (mg/dL)"
+  )
+
+ggplot(pctab, aes(x = PC1, y = PC2, colour = sex)) +
+  geom_point(alpha = 0.7) +
+  scale_colour_manual(values = c(lightBlue, darkBlue), labels = c("Male", "Female")) +
+  labs(title = "Ancestry plot by sex", x = pcLabel(1), y = pcLabel(2), colour = "Sex")
+
+# What about the other PCs? Any structure apparent there?
+pcPairs <- combn(1:4, 2)
+pctabPairs <- do.call(rbind, lapply(seq_len(ncol(pcPairs)), function(i) {
+  data.frame(pair = paste0("PC", pcPairs[1, i], " (x) vs PC", pcPairs[2, i], " (y)"),
+             x = pctab[[paste0("PC", pcPairs[1, i])]],
+             y = pctab[[paste0("PC", pcPairs[2, i])]])
+}))
+
+ggplot(pctabPairs, aes(x = x, y = y)) +
+  geom_point(colour = lightBlue, size = 1) +
+  facet_wrap(~ pair, scales = "free") +
+  labs(title = "Principal components 1 to 4, pairwise", x = "Principal component (x)", y = "Principal component (y)")
+
+# To evaluate the pattern of how much genetic variation is captured by PCs,
+# we plot the percent of variance explained by each eigenvector.
+
+ggplot(data.frame(PC = 1:20, variance = 100*pca$varprop[1:20]), aes(x = PC, y = variance)) +
+  geom_col(fill = lightBlue) +
+  labs(title = "Scree plot", x = "Index of eigenvector", y = "Variance explained (%)")
+```
+
+## QC Summary
+
+```{r qc-attrition-summary}
+qcSteps
+
+qcLong <- data.frame(step = factor(rep(qcSteps$step, 2), levels = qcSteps$step),
+                     what = rep(c("Individuals", "SNPs"), each = nrow(qcSteps)),
+                     count = c(qcSteps$individuals, qcSteps$SNPs))
+
+ggplot(qcLong, aes(x = step, y = count)) +
+  geom_col(fill = lightBlue) +
+  geom_text(aes(label = count), vjust = -0.3, size = 3) +
+  facet_wrap(~ what, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(title = "Individuals and SNPs remaining after each QC step", x = "QC step", y = "Number remaining") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r save-for-next-lab}
+# What would we need to change to estimate all PCs from which we could find
+# the trace and express the eigenvalues as the proportion of variance?
+# the snpgdsPCA captures this measure for the the calculated eigenvalues, check out pca$varprop
+
+
+# Terminate our special .gds file. R gets cranky if you close a session and
+# the link to the gds is open
+closefn.gds(genofile)
+
+# Recalculate summary statistics for the final set of individuals and SNPs
+snpsum.row <- row.summary(genotype)
+snpsum.col <- col.summary(genotype)
+
+#save the processing in this step for the next lab
+#write.csv(pctab, file = "pctab.csv", row.names = FALSE)
+save(genotype,genoMap,snpsum.col, snpsum.row, clinical, pcs, file= "lab2_save.RData")
+```
